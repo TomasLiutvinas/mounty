@@ -1,7 +1,6 @@
 # mounty / unmounty
 
 CLI helpers for quickly mounting and unmounting removable storage devices on Linux.  
-Designed for Arch Linux + Hyprland + Wayland terminal workflows.
 
 ## Features
 
@@ -27,65 +26,65 @@ Designed for Arch Linux + Hyprland + Wayland terminal workflows.
 
 ### Install on Arch Linux
 
-~~~md
+```bash
 sudo pacman -S python fzf util-linux
-~~~
+```
 
 ## Installation
 
 Clone the repository:
 
-~~~md
+```bash
 git clone https://github.com/<yourname>/mounty
 cd mounty
-~~~
+```
 
 Make scripts executable:
 
-~~~md
+```bash
 chmod +x mounty
 chmod +x unmounty
-~~~
+```
 
-Add user-level commands:
+add user-level commands:
 
-~~~md
+```bash
 ln -s "$(pwd)/mounty" ~/.local/bin/mounty
 ln -s "$(pwd)/unmounty" ~/.local/bin/unmounty
-~~~
+```
 
-Ensure `~/.local/bin` is in your PATH:
+ensure `~/.local/bin` is in your path:
 
-~~~md
-echo $PATH
-~~~
+```bash
+echo $path
+```
 
-## Usage
+## usage
 
-### Mount a device
+### mount a device
 
-~~~md
+```bash
 sudo mounty
-~~~
+```
 
-1. Choose a device  
-2. Choose a mountpoint under `/mnt/*`  
+1. choose a device  
+2. choose a mountpoint under `/mnt/*`  
 3. mounty performs the mount
 
-### Unmount a device
+### unmount a device
 
-~~~md
+```bash
 sudo unmounty
-~~~
+```
 
-1. Choose a mounted entry under `/mnt/*`  
+1. choose a mounted entry under `/mnt/*`  
 2. unmounty performs the unmount
 
-## Suggested mountpoint layout
+## suggested mountpoint layout
 
-~~~md
+```bash
 sudo mkdir -p /mnt/{sdcard,12tb,dexter,floki,vbear,temp}
-~~~
+```
 
 mounty will show only unused mountpoints.
 
