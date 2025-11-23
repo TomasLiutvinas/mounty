@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+
+def require_cmd(cmd: str) -> None:
+    if subprocess.call(["sh", "-c", f"command -v {cmd} >/dev/null 2>&1"]) != 0:
+        print(f"Required command '{cmd}' not found in PATH", file=sys.stderr)
+        sys.exit(1)
+
+
+# ----- root check -----
+
+if os.geteuid() != 0:
+    print("Run as root (use: sudo mounty)", file=sys.stderr)
+    sys.exit(1)
+
+for c in ["lsblk", "fzf", "mount", "findmnt"]:
+    require_cmd(c)
+
+
+MIN_INTERNAL_PART_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB cutoff for non-removable
+
+
+def run_json(cmd):
+    out = subprocess.check_output(cmd, text=True)
+    return json.loads(out)
+
+
+def collect_candidates():
+    """
+    Return list of dictionaries like:
+    {
+        "path": "/dev/sdXn",
+        "size_bytes": 123456,
+        "fstype": "ntfs",
+        "label": "SomeLabel",
+        "model": "DeviceModel"
+    }
+    """
+    # -b → SIZE in bytes
+    ls = run_json(
+        ["lsblk", "-bJ", "-o", "NAME,TYPE,FSTYPE,MOUNTPOINT,LABEL,MODEL,SIZE,RM"]
+    )
+
+    candidates = []
+
+    def walk(dev):
+        dtype = dev.get("type")
+        name = dev.get("name")
+        fstype = (dev.get("fstype") or "").strip()
+        mnt = dev.get("mountpoint") or ""
+        label = dev.get("label") or "-"
+        model = dev.get("model") or "-"
+        size_bytes = int(dev.get("size") or 0)
+        rm = int(dev.get("rm") or 0)  # 0 = internal, 1 = removable
+
+        for ch in dev.get("children", []) or []:
+            walk(ch)
+
+        # only partitions / crypto
+        if dtype not in ("part", "crypt"):
+            return
+
+        # need a real filesystem
+        if not fstype or fstype.lower() == "swap":
+            return
+
+        # only unmounted
+        if mnt:
+            return
+
+        # hide small internal (non-removable) system partitions
+        if rm == 0 and size_bytes < MIN_INTERNAL_PART_BYTES:
+            return
+
+        path = f"/dev/{name}"
+
+        candidates.append(
+            {
+                "path": path,
+                "size_bytes": size_bytes,
+                "fstype": fstype,
+                "label": label,
+                "model": model,
+            }
+        )
+
+    for top in ls.get("blockdevices", []):
+        walk(top)
+
+    return candidates
+
+
+def fzf_select(lines, prompt, header=None, nth=None):
+    if not lines:
+        return ""
+
+    cmd = ["fzf", "--prompt", prompt]
+    if header:
+        cmd.extend(["--header", header])
+    if nth:
+        cmd.extend(["--with-nth", nth])
+
+    proc = subprocess.run(
+        cmd,
+        input="\n".join(lines),
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip("\n")
+
+
+def free_mountpoints():
+    entries = []
+    base = "/mnt"
+
+    if not os.path.isdir(base):
+        return entries
+
+    for name in sorted(os.listdir(base)):
+        d = os.path.join(base, name)
+        if not os.path.isdir(d):
+            continue
+
+        # findmnt for this path, but check if the TARGET equals the dir itself
+        res = subprocess.run(
+            ["findmnt", "-rn", "--target", d, "-o", "TARGET"],
+            text=True,
+            capture_output=True,
+        )
+
+        if res.returncode == 0:
+            target = res.stdout.strip().split()[0]
+            # if the directory itself is the mountpoint, skip it
+            if target == d:
+                continue
+
+        entries.append(d)
+
+    return entries
+
+
+# ----- devices -----
+
+cands = collect_candidates()
+if not cands:
+    print("No unmounted block devices found.", file=sys.stderr)
+    sys.exit(1)
+
+device_lines = []
+for c in cands:
+    # human readable size
+    sz = c["size_bytes"]
+    if sz >= 1024**4:
+        size_str = f"{sz / 1024**4:.1f}T"
+    else:
+        size_str = f"{sz / 1024**3:.1f}G"
+
+    device_lines.append(
+        f'{c["path"]}\t{size_str}\t{c["fstype"]}\t{c["label"]}\t{c["model"]}'
+    )
+
+selected_line = fzf_select(
+    device_lines,
+    prompt="Select device > ",
+    header="Device\tSize\tFstype\tLabel\tModel",
+    nth="1,2,3,4,5",
+)
+
+if not selected_line:
+    sys.exit(1)
+
+device = selected_line.split("\t", 1)[0]
+
+# ----- mountpoints -----
+
+mnts = free_mountpoints()
+if not mnts:
+    print("No free /mnt/* directories found.", file=sys.stderr)
+    sys.exit(1)
+
+mountpoint = fzf_select(mnts, prompt="Select mount point > ")
+if not mountpoint:
+    sys.exit(1)
+
+print(f"Mounting:\n  {device}  ->  {mountpoint}")
+subprocess.check_call(["mount", device, mountpoint])
+print("Done.")

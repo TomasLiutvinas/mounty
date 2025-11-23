@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+import os
+import shlex
+import subprocess
+import sys
+from typing import List, Dict
+
+
+def require_cmd(cmd: str) -> None:
+    if subprocess.call(["sh", "-c", f"command -v {cmd} >/dev/null 2>&1"]) != 0:
+        print(f"Required command '{cmd}' not found in PATH", file=sys.stderr)
+        sys.exit(1)
+
+
+# ----- root check -----
+if os.geteuid() != 0:
+    print("Run as root (use: sudo unmounty)", file=sys.stderr)
+    sys.exit(1)
+
+for c in ["findmnt", "fzf", "umount"]:
+    require_cmd(c)
+
+
+def run_pairs(cmd: List[str]) -> List[Dict[str, str]]:
+    """
+    Run findmnt -P and parse lines like:
+      TARGET="/mnt/sdcard" SOURCE="/dev/sdd1" FSTYPE="exfat" SIZE="115.9G" LABEL="EOS_DIGITAL"
+    into dicts.
+    """
+    out = subprocess.check_output(cmd, text=True)
+    result: List[Dict[str, str]] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # shlex respects quotes
+        fields = shlex.split(line)
+        entry: Dict[str, str] = {}
+        for f in fields:
+            if "=" not in f:
+                continue
+            k, v = f.split("=", 1)
+            entry[k] = v.strip('"')
+        result.append(entry)
+    return result
+
+
+def collect_mounts() -> List[Dict[str, str]]:
+    """
+    Return mounts under /mnt:
+      { "TARGET": "/mnt/sdcard", "SOURCE": "/dev/sdd1",
+        "FSTYPE": "exfat", "SIZE": "115.9G", "LABEL": "EOS_DIGITAL" }
+    """
+    rows = run_pairs(["findmnt", "-P", "-o", "TARGET,SOURCE,FSTYPE,SIZE,LABEL"])
+
+    items: List[Dict[str, str]] = []
+    for fs in rows:
+        target = fs.get("TARGET") or ""
+        if not target.startswith("/mnt/"):
+            continue
+
+        source = fs.get("SOURCE") or "-"
+        # normalise weird forms like /dev/sda2[/mnt/hidden_steam]
+        if "[" in source:
+            source = source.split("[", 1)[0]
+
+        fstype = fs.get("FSTYPE") or "-"
+        size = fs.get("SIZE") or "-"
+        label = fs.get("LABEL") or "-"
+
+        items.append(
+            {
+                "target": target,
+                "source": source,
+                "fstype": fstype,
+                "size": size,
+                "label": label,
+            }
+        )
+    return items
+
+
+def fzf_select(lines: List[str], prompt: str, header: str = "") -> str:
+    if not lines:
+        return ""
+    cmd = ["fzf", "--prompt", prompt]
+    if header:
+        cmd.extend(["--header", header])
+    proc = subprocess.run(
+        cmd,
+        input="\n".join(lines),
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip("\n")
+
+
+mounts = collect_mounts()
+if not mounts:
+    print("No mounts under /mnt found.", file=sys.stderr)
+    sys.exit(1)
+
+# Build pretty, index-based lines so parsing is trivial
+lines: List[str] = []
+for idx, m in enumerate(mounts, start=1):
+    lines.append(
+        f"{idx:>2}  "
+        f"{m['target']:<26}  "
+        f"{m['source']:<22}  "
+        f"{m['size']:>8}  "
+        f"{m['fstype']:<8}  "
+        f"{m['label']}"
+    )
+
+selected = fzf_select(
+    lines,
+    prompt="Select mount to unmount > ",
+    header="No  Mountpoint                 Device                  Size      Fstype    Label",
+)
+
+if not selected:
+    sys.exit(1)
+
+# First column is index
+try:
+    sel_idx = int(selected.split()[0]) - 1
+except (ValueError, IndexError):
+    print("Failed to parse selection.", file=sys.stderr)
+    sys.exit(1)
+
+if not (0 <= sel_idx < len(mounts)):
+    print("Selection out of range.", file=sys.stderr)
+    sys.exit(1)
+
+entry = mounts[sel_idx]
+mnt_path = entry["target"]
+dev_path = entry["source"]
+
+print("Unmounting:")
+print(f"  {mnt_path}  ({dev_path})")
+subprocess.check_call(["umount", mnt_path])
+print("Done.")
